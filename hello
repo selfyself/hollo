@@ -1,0 +1,245 @@
+//--22/12/2015-- rivisto (CNTROL) controllo temperatura e umidità rimangono da modificare le pagine (page2 e 3)
+//--28/12/2015--  board5_test
+//--28/12/2015--  modifica scritta SD (storedata page)
+//--31/12/2015--  / se è giorno attiva la funzione del controllo del co2
+//--31/12/2015-- versione deumidificatore
+//--12/10/2017-- modificati parametri. in uso questa versione
+//--15/10/2017--ur+ d6
+///////////////////////////////////////////////////////////////
+//   D0 =TX          D7 =LIGHTS         A0 =BUTTON           A7 =PHOTORESISTOR
+//   D1 =RX          D8 =TEMP+          A1 =POTENZ.TEMP
+//   D2 =DHT22       D9 =AIR            A2 =POTENZ.UR
+//   D3 =C02+        D10 =CS            A3 =POTENZ.CO2
+//   D4 =UR-         D11 =MOSI          A4 =SDA
+//   D5 =            D12 =MISO          A5 =SCL
+//   D6 =UR+         D13 =SCK           A6 =
+/////////////////////////////////////////////////////////////////
+#include <dht.h>
+#include <LiquidCrystal_I2C.h>
+#include <SD.h>
+#include <Wire.h>
+#include <SPI.h>
+
+#define DS3231_I2C_ADDRESS 0x68
+// Convert normal decimal numbers to binary coded decimal
+byte decToBcd(byte val)
+{  return( (val/10*16) + (val%10) );}
+// Convert binary coded decimal to normal decimal numbers
+byte bcdToDec(byte val)
+{  return( (val/16*10) + (val%16) );}
+byte second, minute, hour, dayOfWeek, dayOfMonth, month, year;
+
+//------------------------DEFINE PINS---------------------------
+#define chipSelect    10     // SD CARD
+#define RelayExtFan   9     // relay ESTRATTORE ARIA (COLD AIR)
+#define Relayheat     8     // relay RISCALDATORE
+#define RelayLight    7     // relay lights
+
+#define RelayUrUp     6     // relay humidifier
+#define RelayUrDown   4     // relay dehumidifier
+#define RelayCo2      3     // relay CO2 +
+#define photoPin      A7    // PHOTORESISTOR
+#define buttonPin     A0    // NAVIGATION BUTTON
+//-----------------------------------------------------------------
+boolean State1= LOW;         // the current state of the output pin
+boolean ButtonRead1;
+boolean State2= LOW;         // the current state of the output pin
+boolean ButtonRead2;
+
+//------------------------DHT22 SETTINGS-------------------
+dht DHT;
+#define DHT22_PIN 2
+//----------------------------ADRESS I2C-----------------------
+int co2Addr = 0x7F;  
+LiquidCrystal_I2C lcd(0x27, 2, 1, 0, 4, 5, 6, 7, 3, POSITIVE);  // Set the LCD I2C address
+//-------------------------------VARIABLES----------------------
+float tempVal,TempHighVal,TempLowVal,urVal,UrHighVal,UrLowVal;
+int  Co2Now, Co22;
+boolean  Co2=0;
+byte  AvgCount = 0;
+float UrNow, TempNow;
+float AvgTempNow,AvgUrNow,AvgCo2 = 0;
+boolean button = 0;
+boolean value=1;  // value variable for the button pressed
+boolean Heat,UrUp,ExtFan,UrDown = 0;
+double VPD;
+boolean c= 0;
+byte page = 0;
+byte  TempStatus, UrStatus, Co2Status = 1;   // (0)-  (1)=  (2)+
+File dataFile;
+double NightSecondsUrUp, DaySecondsUrUp, SecondsCO2, NightSecondsHeat, NightSecondsAir, DaySecondsAir, DaySecondsHeat = 0; 
+boolean light= LOW;
+boolean Lights, var= 0;
+byte in;
+int Photo;
+//--------------------DEFINE MAX/MIN DAY----------------------------  
+double maxUrDay, maxTempDay = 0;
+double minUrDay = 100;
+double minTempDay = 100;
+//--------------------DEFINE MAX/MIN NIGHT----------------------------  
+double maxUrNight, maxTempNight = 0;
+double minUrNight = 100;
+double minTempNight = 100;
+//--------------------DEFINE CONTROL VARIABLES----------------------------  
+boolean ExtFanStatusTemp, ExtFanStatusUr = 0;
+byte DayStatus= 3;
+//------------CUSTOM CHAR----------------------
+byte termometer[8] ={
+  B00100,B01010,B01010,B01010,B01110,B11111,B11111,B01110}; //icon for termometer
+byte umidity[8] ={
+  B00100,B00100,B01010,B01010,B10001,B10001,B11011,B01110};//icon for water droplet 
+byte ledOn[8]	= {
+  B00000, B01110, B10001, B10001, B01010, B01110, B01110}; // icon light bulb
+byte co2[8]	= {
+  B00000, B00000, B00000, B01000, B10100, B01000, B10000, B11100}; // icon "2"
+  
+//--------------------DAY TEMP/UR VALUES----------------------------
+byte TempHighHysDay =25;
+byte TempLowHysDay  =20;
+//---------------------------
+byte UrHighHysDay = 75;
+byte UrLowHysDay = 65;
+//--------------------NIGHT TEMP/UR VALUES----------------------------
+byte TempHighHysNight = 25;  //TempNitHigh
+byte TempLowHysNight = 15;   // TempNitLow
+//----------------------
+byte UrHighHysNight = 65;
+byte UrLowHysNight = 45;
+//------------------CO2 VALUE-----------------------------
+int Co2Value = 1000;
+//--------------------HOUR VALUES-------------------------
+byte hourOn = 20;
+byte minOn = 00;
+byte hourOff = 10;
+byte minOff = 00;
+
+
+
+
+void setup()
+{
+  
+  //--------LCD SETUP ------------
+  lcd.begin(20, 4);   
+  lcd.noBacklight();
+  lcd.createChar(1, termometer);
+  lcd.createChar(2, umidity);
+  lcd.createChar(3, ledOn);
+  lcd.createChar(4, co2);
+ // Serial.begin(9600);
+ //--------PIN MODE SETUP ------------
+  pinMode(10, OUTPUT);            // SD CARD OUTPUT
+  pinMode(RelayExtFan, OUTPUT);   // 9  LED VENTOLA ESTERNA
+  pinMode(Relayheat, OUTPUT);     // 8  LED RISCALDAMENTO
+  pinMode(RelayLight, OUTPUT);    // 7  LED  LUCI STANZA
+  pinMode(RelayUrUp, OUTPUT);     // 6  LED UMIDIFICATORE
+  pinMode(RelayUrDown, OUTPUT);   // 4  LED DEUMIDIFICATORE
+  pinMode(RelayCo2, OUTPUT);      // 3  LED CO2 ON
+  pinMode(buttonPin, INPUT);      // A0 NAVIGATION BUTTON
+  digitalWrite(buttonPin, HIGH );
+  pinMode(A7, INPUT); // pin fotoresistenza
+  pinMode(A1, INPUT);      // A1 TEMP
+  pinMode(A2, INPUT);      // A2 UR
+  pinMode(A3, INPUT);      // A3 co2
+  pinMode(6, OUTPUT);      // pulsante deumidificatore
+  digitalWrite(6, LOW); 
+  //--------SD CARD SETUP ------------
+//cardsetup:
+  if (!SD.begin(chipSelect)) {
+    lcd.setCursor(0, 1);
+    lcd.print("CARD FAILED OR NOT");
+    lcd.setCursor(0, 2);
+    lcd.print("PRESENT");
+    // don't do anything more:
+    delay (500);
+    {
+//      goto cardsetup;
+    }
+  }
+}
+
+void setDS3231time(byte second, byte minute, byte hour, byte dayOfWeek, byte
+dayOfMonth, byte month, byte year)
+{
+  // sets time and date data to DS3231
+  Wire.beginTransmission(DS3231_I2C_ADDRESS);
+  Wire.write(0); // set next input to start at the seconds register
+  Wire.write(decToBcd(second)); // set seconds
+  Wire.write(decToBcd(minute)); // set minutes
+  Wire.write(decToBcd(hour)); // set hours
+  Wire.write(decToBcd(dayOfWeek)); // set day of week (1=Sunday, 7=Saturday)
+  Wire.write(decToBcd(dayOfMonth)); // set date (1 to 31)
+  Wire.write(decToBcd(month)); // set month
+  Wire.write(decToBcd(year)); // set year (0 to 99)
+  Wire.endTransmission();
+}
+
+void readDS3231time(byte *second,
+byte *minute,
+byte *hour,
+byte *dayOfWeek,
+byte *dayOfMonth,
+byte *month,
+byte *year)
+{
+  Wire.beginTransmission(DS3231_I2C_ADDRESS);
+  Wire.write(0); // set DS3231 register pointer to 00h
+  Wire.endTransmission();
+  Wire.requestFrom(DS3231_I2C_ADDRESS, 7);
+  // request seven bytes of data from DS3231 starting from register 00h
+  *second = bcdToDec(Wire.read() & 0x7f);
+  *minute = bcdToDec(Wire.read());
+  *hour = bcdToDec(Wire.read() & 0x3f);
+  *dayOfWeek = bcdToDec(Wire.read());
+  *dayOfMonth = bcdToDec(Wire.read());
+  *month = bcdToDec(Wire.read());
+  *year = bcdToDec(Wire.read());
+}
+
+
+
+void loop()
+{
+  
+ // delay(50);
+  readDS3231time(&second, &minute, &hour, &dayOfWeek, &dayOfMonth, &month,
+  &year);
+  
+// CONTROLLA PULSANTI
+int b = checkButton();
+if (b == 1) State1 = HIGH;
+if (b == 3) State2 = HIGH;
+
+//---------------CONTROLLO PULSANTI E PAGINE-----------------------  
+   if(State1 == HIGH ){  
+     page++;
+     lcd.clear();
+     State1 = LOW;
+     if(page==8){
+     page= 0;}}
+     Pages();  
+ 
+// ATTIVA MAINROUTINE OGNI SECONDO
+  if (second%2==0&&c==0){     // PARI
+    c=1;
+    
+   MainRoutine();
+   if(var==1){
+  digitalWrite(6, LOW);   // pulsante deumidificatore
+  } 
+   
+  }  
+   if (second%2==1&&c==1){    // DISPARI
+     c=0;
+  
+   if(Lights==1 && var ==0){
+  digitalWrite(6, HIGH);   // pulsante deumidificatore
+  var=1;
+  } 
+      
+  }
+   
+ 
+
+  
+}
